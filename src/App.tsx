@@ -254,7 +254,7 @@ function App() {
         <span className="capture-note">{!modelsLoaded ? 'Preparing…' : !videoReady ? 'One moment…' : 'Capture'}</span>
       </div>}
       {view === 'result' && !capturing && <>
-        <label className="depth-control"><span>Relief depth</span><input type="range" min="0.6" max="3" step="0.1" value={depth} onChange={event => setDepth(Number(event.target.value))}/><output>{depth.toFixed(1)}×</output></label>
+        <label className="depth-control"><span>Relief depth</span><input type="range" aria-label="Relief depth" min="0.6" max="3" step="0.1" value={depth} onChange={event => setDepth(Number(event.target.value))}/><output>{depth.toFixed(1)}×</output></label>
         <div className="result-actions"><button className="button button-primary" onClick={startCamera}><Icon name="camera"/> Retake</button><button className="button button-secondary" onClick={openPhoto}><Icon name="upload"/> Change photo</button></div>
       </>}
       {capturing && <p className="privacy-copy">Processing on your device.</p>}
