@@ -8,6 +8,11 @@ import './App.css';
 const App: React.FC = () => {
   const [imageData, setImageData] = useState<string | null>(null);
   const [heightMap, setHeightMap] = useState<Float32Array | null>(null);
+  const [cameraActive, setCameraActive] = useState(false);
+  const [cameraStarting, setCameraStarting] = useState(false);
+  const [capturing, setCapturing] = useState(false);
+  const streamRef = useRef<MediaStream | null>(null);
+  const cameraRequestRef = useRef(0);
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -18,13 +23,9 @@ const App: React.FC = () => {
     // Load face-api models
     const loadModels = async () => {
       try {
-        console.log('Loading face detection models...');
         await faceapi.nets.tinyFaceDetector.loadFromUri('/models');
-        console.log('TinyFaceDetector loaded');
         await faceapi.nets.faceLandmark68Net.loadFromUri('/models');
-        console.log('FaceLandmark68Net loaded');
         setModelsLoaded(true);
-        console.log('All models loaded successfully');
       } catch (error) {
         console.error('Error loading face detection models:', error);
         setError('Failed to load face detection models. Please check the console for details.');
@@ -33,24 +34,46 @@ const App: React.FC = () => {
     loadModels();
   }, []);
 
-  useEffect(() => {
-    if (videoRef.current) {
-      navigator.mediaDevices.getUserMedia({ video: true })
-        .then(stream => {
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-            console.log('Camera stream started');
-          }
-        })
-        .catch(err => {
-          console.error('Error accessing camera:', err);
-          setError('Failed to access camera. Please ensure you have granted camera permissions.');
-        });
-    }
+  const stopCamera = () => {
+    cameraRequestRef.current += 1;
+    streamRef.current?.getTracks().forEach(track => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setCameraActive(false);
+    setCameraStarting(false);
+  };
+
+  useEffect(() => () => {
+    cameraRequestRef.current += 1;
+    streamRef.current?.getTracks().forEach(track => track.stop());
   }, []);
 
+  const startCamera = async () => {
+    const request = ++cameraRequestRef.current;
+    setCameraStarting(true);
+    setError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false,
+      });
+      if (request !== cameraRequestRef.current) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
+      streamRef.current = stream;
+      if (videoRef.current) videoRef.current.srcObject = stream;
+      setCameraActive(true);
+    } catch {
+      if (request === cameraRequestRef.current) {
+        setError('Camera unavailable. Allow camera access in your browser, or open the demo in its own tab.');
+      }
+    } finally {
+      if (request === cameraRequestRef.current) setCameraStarting(false);
+    }
+  };
+
   const captureImage = async () => {
-    console.log('Starting image capture...');
     if (!videoRef.current || !canvasRef.current || !faceCanvasRef.current) {
       console.error('Missing required refs');
       return;
@@ -72,32 +95,34 @@ const App: React.FC = () => {
       return;
     }
 
+    if (!video.videoWidth || !video.videoHeight) {
+      setError('Wait for the camera preview before capturing.');
+      return;
+    }
+    setCapturing(true);
     try {
+      // Bound mesh resolution so camera dimensions cannot overwhelm a phone GPU.
+      const scale = Math.min(1, 256 / Math.max(video.videoWidth, video.videoHeight));
       // Set canvas dimensions
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      faceCanvas.width = video.videoWidth;
-      faceCanvas.height = video.videoHeight;
-      console.log('Canvas dimensions set:', { width: canvas.width, height: canvas.height });
+      canvas.width = Math.max(2, Math.round(video.videoWidth * scale));
+      canvas.height = Math.max(2, Math.round(video.videoHeight * scale));
+      faceCanvas.width = canvas.width;
+      faceCanvas.height = canvas.height;
 
       // Draw video frame to canvas
-      context.drawImage(video, 0, 0);
-      console.log('Video frame drawn to canvas');
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
       
       // Detect face
-      console.log('Starting face detection...');
       const detections = await faceapi.detectSingleFace(
         canvas,
         new faceapi.TinyFaceDetectorOptions()
       ).withFaceLandmarks();
 
       if (!detections) {
-        console.log('No face detected');
         setError('No face detected. Please ensure your face is visible in the camera.');
         return;
       }
 
-      console.log('Face detected:', detections);
       
       // Clear face canvas
       faceContext.clearRect(0, 0, faceCanvas.width, faceCanvas.height);
@@ -169,7 +194,6 @@ const App: React.FC = () => {
       // Fill and close the path
       faceContext.closePath();
       faceContext.fill();
-      console.log('Complete head mask created');
 
       // Convert to grayscale and apply mask
       const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
@@ -193,7 +217,6 @@ const App: React.FC = () => {
       }
       
       context.putImageData(imageData, 0, 0);
-      console.log('Image processed and masked');
       
       // Create heightmap data
       const heightMapData = new Float32Array(canvas.width * canvas.height);
@@ -204,32 +227,46 @@ const App: React.FC = () => {
       setHeightMap(heightMapData);
       setImageData(canvas.toDataURL());
       setError(null);
-      console.log('Heightmap created and state updated');
     } catch (error) {
       console.error('Error during image capture:', error);
-      setError('An error occurred during image capture. Please check the console for details.');
+      setError('An error occurred during image capture. Please try again.');
+    } finally {
+      setCapturing(false);
     }
   };
 
   return (
     <div className="App">
+      <header>
+        <h1>Face → height map</h1>
+        <p>Turn a camera snapshot into a 3D wireframe.</p>
+        <p className="privacy-note">Your camera image is processed in this browser. It is not uploaded.</p>
+      </header>
       <div className="camera-container">
         <video
           ref={videoRef}
           autoPlay
           playsInline
           muted
-          style={{ width: '640px', height: '480px' }}
+          aria-label="Camera preview"
+          hidden={!cameraActive}
         />
-        <button onClick={captureImage}>Capture Image</button>
-        {error && <div className="error-message">{error}</div>}
+        <div className="camera-actions">
+          {cameraActive ? <>
+            <button onClick={captureImage} disabled={!modelsLoaded || capturing}>{capturing ? 'Processing…' : 'Capture image'}</button>
+            <button onClick={stopCamera}>Stop camera</button>
+          </> : <button onClick={startCamera} disabled={cameraStarting}>{cameraStarting ? 'Starting camera…' : 'Try with my camera'}</button>}
+        </div>
+        <p role="status">{modelsLoaded ? 'Face detection ready' : 'Loading face detection…'}</p>
+        {error && <div role="alert" className="error-message">{error}</div>}
         <canvas ref={canvasRef} style={{ display: 'none' }} />
         <canvas ref={faceCanvasRef} style={{ display: 'none' }} />
       </div>
       
+      {imageData && <img className="capture-preview" src={imageData} alt="Grayscale face capture used for the height map" />}
       {heightMap && (
         <div className="three-container">
-          <Canvas camera={{ position: [0, 0, 5] }}>
+          <Canvas dpr={[1, 1.5]} camera={{ position: [0, 0, 14] }}>
             <ambientLight intensity={0.5} />
             <pointLight position={[10, 10, 10]} />
             <HeightMapMesh heightMap={heightMap} width={canvasRef.current?.width || 0} height={canvasRef.current?.height || 0} />
@@ -269,7 +306,7 @@ const HeightMapMesh: React.FC<{ heightMap: Float32Array; width: number; height: 
     <mesh>
       <planeGeometry
         ref={geometry}
-        args={[10, 10, width - 1, height - 1]}
+        args={[10, 10 * height / width, width - 1, height - 1]}
       />
       <meshBasicMaterial
         color="#00ff00"

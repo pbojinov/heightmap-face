@@ -1,44 +1,17 @@
-.App {
-  text-align: center;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background-color: #282c34;
-  color: white;
-}
-
-.camera-container {
-  margin-bottom: 2rem;
-}
-
-.three-container {
-  width: 800px;
-  height: 600px;
-  border: 1px solid #ccc;
-}
-
-button {
-  margin-top: 1rem;
-  padding: 0.5rem 1rem;
-  font-size: 1rem;
-  background-color: #61dafb;
-  color: #282c34;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-button:hover {
-  background-color: #4fa8c7;
-}
-
-.error-message {
-  margin-top: 1rem;
-  padding: 0.5rem;
-  background-color: #ff4444;
-  color: white;
-  border-radius: 4px;
-  max-width: 400px;
-} 
+.App { box-sizing: border-box; min-height: 100vh; padding: 24px 16px; display: flex; flex-direction: column; align-items: center; background: #121618; color: #eef3f1; text-align: center; }
+header { max-width: 640px; margin-bottom: 20px; }
+h1 { margin: 0 0 8px; font-size: clamp(24px, 5vw, 36px); }
+p { margin: 8px 0; line-height: 1.5; }
+.privacy-note { color: #aebdb7; font-size: 13px; }
+.camera-container { width: min(100%, 640px); }
+video { display: block; width: 100%; max-height: 45vh; object-fit: contain; border-radius: 8px; background: #20292a; }
+video[hidden] { display: none; }
+.camera-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+button { padding: 12px 18px; font: inherit; font-weight: 600; background: #92f1bc; color: #13271c; border: 0; border-radius: 6px; cursor: pointer; }
+button:hover { background: #b9f8d4; }
+button:disabled { opacity: .55; cursor: wait; }
+button:focus-visible { outline: 3px solid white; outline-offset: 3px; }
+.error-message { padding: 12px; background: #522827; border: 1px solid #c97e78; border-radius: 6px; }
+.capture-preview { width: 128px; max-height: 128px; object-fit: contain; margin: 16px; }
+.three-container { width: min(100%, 800px); height: clamp(300px, 60vh, 600px); border: 1px solid #34483d; border-radius: 8px; overflow: hidden; margin-top: 12px; }
+.three-container canvas { touch-action: none; }
