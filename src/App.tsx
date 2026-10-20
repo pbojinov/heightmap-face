@@ -1,16 +1,15 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Canvas } from '@react-three/fiber';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 import * as faceapi from 'face-api.js';
+import { createMeshIndices, heightMapFromRgba, type HeightMapData } from './heightmap';
 import './App.css';
 
 let modelLoad: Promise<void> | undefined;
 function loadFaceModels() {
   if (!modelLoad) {
     modelLoad = (async () => {
-      // The old WebGL inference backend stalls on some browsers. The mesh
-      // still uses WebGL; run the small, one-shot face detection on the CPU.
       await faceapi.tf.setBackend('cpu');
       await faceapi.tf.ready();
       await Promise.all([
@@ -22,362 +21,265 @@ function loadFaceModels() {
   return modelLoad;
 }
 
+function Icon({ name }: { name: 'camera' | 'upload' | 'back' | 'reset' | 'lock' }) {
+  const paths = {
+    camera: ['M8 5 9.5 3h5L16 5h4v15H4V5h4Z', 'M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z'],
+    upload: ['M12 16V3m-4 4 4-4 4 4', 'M4 14v6h16v-6'],
+    back: ['m14 6-6 6 6 6'],
+    reset: ['M4 10a8 8 0 1 1 1 7', 'M4 4v6h6'],
+    lock: ['M6 10h12v10H6Z', 'M8 10V7a4 4 0 0 1 8 0v3'],
+  };
+  return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name].map(d => <path key={d} d={d} />)}</svg>;
+}
 
-const App: React.FC = () => {
-  const [imageData, setImageData] = useState<string | null>(null);
-  const [heightMap, setHeightMap] = useState<Float32Array | null>(null);
+function PortraitGlyph() {
+  return <svg className="portrait-glyph" viewBox="0 0 220 240" fill="none" aria-hidden="true">
+    <defs><radialGradient id="portrait-glow"><stop stopColor="#b8f0d3" stopOpacity=".18"/><stop offset="1" stopColor="#b8f0d3" stopOpacity="0"/></radialGradient></defs>
+    <circle cx="110" cy="120" r="110" fill="url(#portrait-glow)" stroke="none" />
+    <g stroke="currentColor" strokeWidth=".9">
+      <path d="M110 25C65 25 48 57 52 111c3 50 21 85 58 104 37-19 55-54 58-104 4-54-13-86-58-86Z"/>
+      <path d="M110 25c-25 23-39 64-34 106 3 39 15 65 34 84M110 25c25 23 39 64 34 106-3 39-15 65-34 84M110 25v190"/>
+      <path d="M61 62c30-12 67-12 98 0M53 87c35-11 79-11 114 0M52 113c35-6 81-6 116 0M57 140c32 4 74 4 106 0M66 165c27 8 61 8 88 0M82 190c17 6 39 6 56 0"/>
+      <path d="m58 71 104 85M52 100l98 73M63 153l100-79M72 179l95-76M92 205l72-77" opacity=".45"/>
+      <path d="m110 87-13 42 23 3-10-45M88 153q22 10 44-1" opacity=".8"/>
+    </g>
+  </svg>;
+}
+
+function App() {
+  const [view, setView] = useState<'start' | 'camera' | 'result'>('start');
+  const [portrait, setPortrait] = useState<HeightMapData | null>(null);
+  const [depth, setDepth] = useState(1.8);
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraStarting, setCameraStarting] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [modelsFailed, setModelsFailed] = useState(false);
   const [capturing, setCapturing] = useState(false);
-  const streamRef = useRef<MediaStream | null>(null);
-  const cameraRequestRef = useRef(0);
-  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const faceCanvasRef = useRef<HTMLCanvasElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const requestRef = useRef(0);
+  const busyRef = useRef(false);
+  const controlsRef = useRef<React.ElementRef<typeof OrbitControls>>(null);
 
   useEffect(() => {
     let active = true;
-    loadFaceModels().then(() => {
-      if (active) setModelsLoaded(true);
-    }).catch(() => {
+    loadFaceModels().then(() => { if (active) setModelsLoaded(true); }).catch(() => {
       if (active) {
         setModelsFailed(true);
-        setError('Face detection could not load. Reload this page to try again.');
+        setError('Could not prepare the portrait tool. Reload to try again.');
       }
     });
     return () => { active = false; };
   }, []);
 
   const stopCamera = () => {
-    cameraRequestRef.current += 1;
+    requestRef.current++;
     streamRef.current?.getTracks().forEach(track => track.stop());
     streamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
     setCameraActive(false);
-    setVideoReady(false);
     setCameraStarting(false);
+    setVideoReady(false);
   };
 
   useEffect(() => () => {
-    cameraRequestRef.current += 1;
+    requestRef.current++;
     streamRef.current?.getTracks().forEach(track => track.stop());
   }, []);
 
   const startCamera = async () => {
-    const request = ++cameraRequestRef.current;
+    const request = ++requestRef.current;
+    setView('camera');
     setCameraStarting(true);
     setVideoReady(false);
     setError(null);
     try {
-      if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera is unavailable');
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera unavailable');
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-        audio: false,
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 840 } }, audio: false,
       });
-      if (request !== cameraRequestRef.current) {
-        stream.getTracks().forEach(track => track.stop());
-        return;
-      }
+      if (request !== requestRef.current) { stream.getTracks().forEach(track => track.stop()); return; }
       streamRef.current = stream;
       setCameraActive(true);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
+      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
     } catch {
-      if (request === cameraRequestRef.current) {
-        streamRef.current?.getTracks().forEach(track => track.stop());
-        streamRef.current = null;
-        if (videoRef.current) videoRef.current.srcObject = null;
-        setCameraActive(false);
-        setVideoReady(false);
-        setError('Camera unavailable. Open this demo in Safari or Chrome and allow camera access, or choose a photo below.');
+      if (request === requestRef.current) {
+        stopCamera();
+        setView(portrait ? 'result' : 'start');
+        setError('Camera access is unavailable. You can upload a portrait instead.');
       }
     } finally {
-      if (request === cameraRequestRef.current) setCameraStarting(false);
+      if (request === requestRef.current) setCameraStarting(false);
     }
   };
 
+  const cancelCamera = () => {
+    stopCamera();
+    setView(portrait ? 'result' : 'start');
+    setError(null);
+  };
+
   const processImage = async (source: CanvasImageSource, sourceWidth: number, sourceHeight: number) => {
-    if (!canvasRef.current || !faceCanvasRef.current) return;
-    if (!modelsLoaded) {
-      console.error('Models not loaded yet');
-      setError('Face detection models are still loading. Please wait.');
-      return;
-    }
-
-    const canvas = canvasRef.current;
-    const faceCanvas = faceCanvasRef.current;
-    const context = canvas.getContext('2d');
-    const faceContext = faceCanvas.getContext('2d');
-
-    if (!context || !faceContext) {
-      console.error('Failed to get canvas contexts');
-      return;
-    }
-
-    if (!sourceWidth || !sourceHeight) {
-      setError('Wait for the camera preview before capturing.');
-      return;
-    }
+    if (busyRef.current) return;
+    if (!modelsLoaded) { setError('Still getting ready. Try again in a moment.'); return; }
+    if (!sourceWidth || !sourceHeight) { setError('Wait for the camera preview, then try again.'); return; }
+    busyRef.current = true;
     setCapturing(true);
     setError(null);
-    // Let the browser paint the processing state before CPU inference begins.
-    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
     try {
-      // Bound mesh resolution so camera dimensions cannot overwhelm a phone GPU.
+      const canvas = document.createElement('canvas');
       const scale = Math.min(1, 256 / Math.max(sourceWidth, sourceHeight));
-      // Set canvas dimensions
       canvas.width = Math.max(2, Math.round(sourceWidth * scale));
       canvas.height = Math.max(2, Math.round(sourceHeight * scale));
-      faceCanvas.width = canvas.width;
-      faceCanvas.height = canvas.height;
-
-      // Draw video frame to canvas
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (!context) throw new Error('Image processing unavailable');
       context.drawImage(source, 0, 0, canvas.width, canvas.height);
-      
-      // Detect face
-      const detections = await faceapi.detectSingleFace(
-        canvas,
-        new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 })
-      ).withFaceLandmarks();
+      // Freeze the image first, then release the camera immediately.
+      stopCamera();
+      await new Promise<void>(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+      const detection = await faceapi.detectSingleFace(canvas, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 })).withFaceLandmarks();
+      if (!detection) throw new Error('No face found. Try a brighter, front-facing portrait.');
 
-      if (!detections) {
-        setError('No face detected. Try a clear, well-lit portrait or center your face in the camera.');
-        return;
-      }
-
-      
-      // Clear face canvas
-      faceContext.clearRect(0, 0, faceCanvas.width, faceCanvas.height);
-      
-      // Create face mask
-      faceContext.fillStyle = 'white';
-      faceContext.beginPath();
-      
-      // Get face landmarks
-      const landmarks = detections.landmarks;
-      
-      // Get all the points we need for a complete face mask
-      const jawLine = landmarks.getJawOutline();
-      const leftEyebrow = landmarks.getLeftEyeBrow();
-      const rightEyebrow = landmarks.getRightEyeBrow();
-      
-      // Calculate face dimensions and center
-      const faceBox = detections.detection.box;
-      const centerX = faceBox.x + faceBox.width / 2;
-      const centerY = faceBox.y + faceBox.height / 2;
-      
-      // Calculate extended head bounds (making it about 40% larger than the detected face)
-      const scaleX = 1.4;
-      const scaleY = 1.6; // More vertical extension for hair
-      const extendedWidth = faceBox.width * scaleX;
-      const extendedHeight = faceBox.height * scaleY;
-      const topY = faceBox.y - (extendedHeight - faceBox.height);
-      
-      // Create extended head shape
-      faceContext.moveTo(faceBox.x - extendedWidth * 0.2, centerY); // Start left of face
-      
-      // Draw left side curve
-      faceContext.quadraticCurveTo(
-        faceBox.x - extendedWidth * 0.1,
-        topY - extendedHeight * 0.1, // Control point
-        centerX,
-        topY - extendedHeight * 0.2 // Top of head
-      );
-      
-      // Draw right side curve
-      faceContext.quadraticCurveTo(
-        faceBox.x + faceBox.width + extendedWidth * 0.1,
-        topY - extendedHeight * 0.1, // Control point
-        faceBox.x + faceBox.width + extendedWidth * 0.2,
-        centerY // Right side
-      );
-      
-      // Connect to jaw
-      faceContext.quadraticCurveTo(
-        faceBox.x + faceBox.width + extendedWidth * 0.1,
-        faceBox.y + faceBox.height + extendedHeight * 0.1,
-        jawLine[jawLine.length - 1].x,
-        jawLine[jawLine.length - 1].y
-      );
-      
-      // Draw jaw line
-      for (let i = jawLine.length - 2; i >= 0; i--) {
-        faceContext.lineTo(jawLine[i].x, jawLine[i].y);
-      }
-      
-      // Close the path back to start
-      faceContext.quadraticCurveTo(
-        faceBox.x - extendedWidth * 0.1,
-        faceBox.y + faceBox.height + extendedHeight * 0.1,
-        faceBox.x - extendedWidth * 0.2,
-        centerY
-      );
-      
-      // Fill and close the path
-      faceContext.closePath();
-      faceContext.fill();
-
-      // Convert to grayscale and apply mask
-      const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-      const faceData = faceContext.getImageData(0, 0, faceCanvas.width, faceCanvas.height);
-      const data = imageData.data;
-      const faceMask = faceData.data;
-      
-      for (let i = 0; i < data.length; i += 4) {
-        // Only process pixels where face mask is white
-        if (faceMask[i] === 255) {
-          const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-          data[i] = avg;     // R
-          data[i + 1] = avg; // G
-          data[i + 2] = avg; // B
-        } else {
-          // Set background to black
-          data[i] = 0;     // R
-          data[i + 1] = 0; // G
-          data[i + 2] = 0; // B
-        }
-      }
-      
-      context.putImageData(imageData, 0, 0);
-      
-      // Create heightmap data
-      const heightMapData = new Float32Array(canvas.width * canvas.height);
-      for (let i = 0; i < data.length; i += 4) {
-        heightMapData[i / 4] = data[i] / 255; // Normalize to 0-1
-      }
-      
-      setHeightMap(heightMapData);
-      setImageData(canvas.toDataURL());
-      setError(null);
-    } catch (error) {
-      console.error('Error during image capture:', error);
-      setError('An error occurred during image capture. Please try again.');
+      const maskCanvas = document.createElement('canvas');
+      maskCanvas.width = canvas.width; maskCanvas.height = canvas.height;
+      const maskContext = maskCanvas.getContext('2d');
+      if (!maskContext) throw new Error('Image processing unavailable');
+      const box = detection.detection.box;
+      const jaw = detection.landmarks.getJawOutline();
+      const left = Math.max(0, box.x - box.width * .06);
+      const right = Math.min(canvas.width, box.x + box.width * 1.06);
+      const top = Math.max(0, box.y - box.height * .12);
+      const bottom = Math.min(canvas.height, Math.max(...jaw.map(point => point.y)) + 2);
+      const center = box.x + box.width / 2;
+      maskContext.fillStyle = 'white';
+      maskContext.beginPath();
+      maskContext.moveTo(jaw[0].x, jaw[0].y);
+      jaw.slice(1).forEach(point => maskContext.lineTo(point.x, point.y));
+      maskContext.quadraticCurveTo(right, top, center, top);
+      maskContext.quadraticCurveTo(left, top, jaw[0].x, jaw[0].y);
+      maskContext.closePath(); maskContext.fill();
+      const cropX = Math.floor(left), cropY = Math.floor(top);
+      const cropWidth = Math.max(2, Math.min(canvas.width - cropX, Math.ceil(right) - cropX));
+      const cropHeight = Math.max(2, Math.min(canvas.height - cropY, Math.ceil(bottom) - cropY));
+      const pixels = context.getImageData(cropX, cropY, cropWidth, cropHeight);
+      const maskPixels = maskContext.getImageData(cropX, cropY, cropWidth, cropHeight);
+      for (let i = 0; i < pixels.data.length; i += 4) pixels.data[i + 3] = maskPixels.data[i + 3];
+      setPortrait(heightMapFromRgba(pixels.data, cropWidth, cropHeight));
+      setDepth(1.8);
+      setView('result');
+    } catch (cause) {
+      setView(portrait ? 'result' : 'start');
+      setError(cause instanceof Error ? cause.message : 'Something went wrong. Try another portrait.');
     } finally {
+      stopCamera();
+      busyRef.current = false;
       setCapturing(false);
     }
   };
 
   const captureImage = async () => {
     const video = videoRef.current;
-    if (!video || !videoReady || video.readyState < 2) {
-      setError('Wait for the camera preview before capturing.');
-      return;
-    }
+    if (!video || !videoReady || video.readyState < 2) return;
     await processImage(video, video.videoWidth, video.videoHeight);
   };
 
   const choosePhoto = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const input = event.currentTarget;
     const file = input.files?.[0];
-    if (!file) return;
+    if (!file || busyRef.current) return;
+    setCapturing(true);
+    setError(null);
     const url = URL.createObjectURL(file);
     try {
-      const image = new Image();
-      image.src = url;
-      await image.decode();
+      const image = new Image(); image.src = url; await image.decode();
       await processImage(image, image.naturalWidth, image.naturalHeight);
     } catch {
-      setError('That photo could not be opened. Try a JPEG or PNG image.');
-    } finally {
-      URL.revokeObjectURL(url);
-      input.value = '';
-    }
+      setError('That photo could not be opened. Try a JPEG or PNG.');
+      setCapturing(false);
+    } finally { URL.revokeObjectURL(url); input.value = ''; }
   };
 
-  return (
-    <div className="App">
-      <header>
-        <h1>Face → height map</h1>
-        <p>Turn a camera snapshot or photo into a 3D wireframe.</p>
-        <p className="privacy-note">Images are processed in your browser and are not uploaded.</p>
-      </header>
-      <div className="camera-container">
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          aria-label="Camera preview"
-          hidden={!cameraActive}
-          onLoadedData={event => setVideoReady(Boolean(streamRef.current && event.currentTarget.videoWidth && event.currentTarget.readyState >= 2))}
-          onCanPlay={event => setVideoReady(Boolean(streamRef.current && event.currentTarget.videoWidth))}
-        />
-        <div className="camera-actions">
-          {cameraActive ? <>
-            <button onClick={captureImage} disabled={!modelsLoaded || !videoReady || capturing}>{capturing ? 'Processing…' : videoReady ? 'Capture image' : 'Waiting for camera…'}</button>
-            <button onClick={stopCamera}>Stop camera</button>
-          </> : <button onClick={startCamera} disabled={cameraStarting || capturing}>{cameraStarting ? 'Starting camera…' : 'Try with my camera'}</button>}
-        </div>
-        <label className="photo-picker">Or choose a photo
-          <input type="file" accept="image/*" onChange={choosePhoto} disabled={!modelsLoaded || capturing} />
-        </label>
-        <p role="status">{capturing ? 'Building your height map…' : modelsLoaded ? 'Face detection ready' : modelsFailed ? 'Face detection unavailable' : 'Loading face detection…'}</p>
-        {error && <div role="alert" className="error-message">{error}</div>}
-        <canvas ref={canvasRef} style={{ display: 'none' }} />
-        <canvas ref={faceCanvasRef} style={{ display: 'none' }} />
-      </div>
-      
-      {imageData && <img className="capture-preview" src={imageData} alt="Grayscale face capture used for the height map" />}
-      {heightMap && (
-        <section className="result" aria-label="3D height map result">
-          <p>Drag on the model to rotate · Pinch to zoom</p>
-          <div className="three-container">
-          <Canvas dpr={[1, 1.5]} camera={{ position: [0, 0, 14] }} fallback={<p>Open this demo in Safari or Chrome to view 3D.</p>}>
-            <ambientLight intensity={0.5} />
-            <pointLight position={[10, 10, 10]} />
-            <HeightMapMesh heightMap={heightMap} width={canvasRef.current?.width || 0} height={canvasRef.current?.height || 0} />
-            <OrbitControls />
-          </Canvas>
-          </div>
-        </section>
-      )}
-    </div>
-  );
-};
+  const openPhoto = () => fileRef.current?.click();
+  const readyFrame = (event: React.SyntheticEvent<HTMLVideoElement>) => setVideoReady(Boolean(streamRef.current && event.currentTarget.videoWidth && event.currentTarget.readyState >= 2));
 
-const HeightMapMesh: React.FC<{ heightMap: Float32Array; width: number; height: number }> = ({ heightMap, width, height }) => {
-  const geometry = useRef<THREE.PlaneGeometry>(null);
-  
+  return <div className={'app-shell view-' + view}>
+    <header className="app-header">
+      {view === 'camera' && !capturing ? <button className="icon-button back-button" onClick={cancelCamera} aria-label="Back"><Icon name="back" /></button> : <span className="brand-mark" aria-hidden="true"><i/><i/><i/><i/></span>}
+      <span className="brand">HEIGHTMAP <span>/ FACE</span></span>
+      <span className="private-badge"><Icon name="lock" /> Private</span>
+    </header>
+
+    <main className="stage" aria-busy={capturing}>
+      {view === 'start' && !capturing && <section className="start-view">
+        <PortraitGlyph />
+        <p className="eyebrow">A PORTRAIT EXPERIMENT</p>
+        <h1>Your portrait,<br/>in another dimension.</h1>
+        <p className="intro-copy">Turn light and shadow into a<br className="wide-break"/> landscape you can explore.</p>
+      </section>}
+
+      <section className="camera-view" hidden={view !== 'camera' || capturing} aria-label="Camera">
+        <video ref={videoRef} autoPlay playsInline muted hidden={!cameraActive} aria-label="Camera preview" onLoadedData={readyFrame} onCanPlay={readyFrame} />
+        {!cameraActive && <div className="camera-placeholder"><Icon name="camera"/><p>{cameraStarting ? 'Opening your camera…' : 'Getting the preview ready…'}</p></div>}
+        {cameraActive && <div className="camera-guide" aria-hidden="true"/>}
+        <div className="camera-caption"><span>TAKE A PORTRAIT</span><p>Center your face in the frame.</p></div>
+      </section>
+
+      {view === 'result' && portrait && !capturing && <section className="result-view" aria-label="3D portrait result">
+        <div className="viewer-label"><span className="live-dot"/> YOUR 3D PORTRAIT</div>
+        <h1 className="sr-only">Your 3D portrait</h1>
+        <Canvas frameloop="demand" dpr={[1, 1.5]} camera={{ position: [0, 0, 14], fov: 45 }} fallback={<p className="viewer-fallback">Open in Safari or Chrome to explore your portrait.</p>}>
+          <PortraitMesh portrait={portrait} depth={depth}/>
+          <OrbitControls ref={controlsRef} enableDamping={false} enablePan={false} minDistance={7} maxDistance={28}/>
+        </Canvas>
+        <button className="icon-button reset-button" onClick={() => controlsRef.current?.reset()} aria-label="Reset view"><Icon name="reset"/></button>
+        <p className="viewer-hint">Drag to rotate <span>·</span> Pinch to explore</p>
+      </section>}
+
+      {capturing && <section className="processing-view" role="status"><div className="processing-orbit"/><h1>Finding your dimension.</h1><p>Creating your portrait…</p></section>}
+    </main>
+
+    <footer className="app-footer">
+      {error && <div className="error-message" role="alert">{error}{modelsFailed && <button onClick={() => window.location.reload()}>Reload</button>}</div>}
+      {view === 'start' && !capturing && <>
+        <button className="button button-primary" onClick={startCamera} disabled={cameraStarting || modelsFailed}><Icon name="camera"/> Use camera</button>
+        <button className="button button-secondary" onClick={openPhoto} disabled={!modelsLoaded}><Icon name="upload"/> Upload a photo</button>
+        <p className="privacy-copy">Your photos stay on your device.</p>
+      </>}
+      {view === 'camera' && !capturing && <div className="capture-controls">
+        <button className="photo-shortcut" onClick={openPhoto} disabled={!modelsLoaded} aria-label="Upload a photo"><Icon name="upload"/><span>Photo</span></button>
+        <button className="shutter" onClick={captureImage} disabled={!modelsLoaded || !videoReady} aria-label="Capture portrait"><span/></button>
+        <span className="capture-note">{!modelsLoaded ? 'Preparing…' : !videoReady ? 'One moment…' : 'Capture'}</span>
+      </div>}
+      {view === 'result' && !capturing && <>
+        <label className="depth-control"><span>Relief depth</span><input type="range" min="0.6" max="3" step="0.1" value={depth} onChange={event => setDepth(Number(event.target.value))}/><output>{depth.toFixed(1)}×</output></label>
+        <div className="result-actions"><button className="button button-primary" onClick={startCamera}><Icon name="camera"/> Retake</button><button className="button button-secondary" onClick={openPhoto}><Icon name="upload"/> Change photo</button></div>
+      </>}
+      {capturing && <p className="privacy-copy">Processing on your device.</p>}
+      {!modelsLoaded && !modelsFailed && !capturing && view === 'start' && <span className="sr-only" role="status">Preparing the portrait tool</span>}
+    </footer>
+    <input ref={fileRef} className="sr-only" type="file" accept="image/*" onChange={choosePhoto} aria-label="Portrait photo" tabIndex={-1} aria-hidden="true" disabled={!modelsLoaded || capturing}/>
+  </div>;
+}
+
+function PortraitMesh({ portrait, depth }: { portrait: HeightMapData; depth: number }) {
+  const { invalidate } = useThree();
+  const geometry = useMemo(() => {
+    const value = new THREE.PlaneGeometry(6, 6 * portrait.height / portrait.width, portrait.width - 1, portrait.height - 1);
+    value.setIndex(createMeshIndices(portrait.mask, portrait.width, portrait.height));
+    return value;
+  }, [portrait]);
   useEffect(() => {
-    if (!geometry.current) return;
-    
-    const vertices = geometry.current.attributes.position.array;
-    
-    // Update vertices based on heightmap
-    for (let i = 0; i < vertices.length; i += 3) {
-      const x = Math.floor((i / 3) % width);
-      const y = Math.floor((i / 3) / width);
-      const heightValue = heightMap[y * width + x] || 0;
-      
-      // Ensure the height value is a valid number
-      vertices[i + 2] = isNaN(heightValue) ? 0 : heightValue * 2;
-    }
-    
-    // Update the geometry
-    geometry.current.attributes.position.needsUpdate = true;
-    geometry.current.computeVertexNormals();
-    geometry.current.computeBoundingSphere();
-  }, [heightMap, width, height]);
-  
-  return (
-    <mesh rotation={[-0.12, -0.5, 0]}>
-      <planeGeometry
-        ref={geometry}
-        args={[10, 10 * height / width, width - 1, height - 1]}
-      />
-      <meshBasicMaterial
-        color="#00ff00"
-        wireframe={true}
-        side={THREE.DoubleSide}
-      />
-    </mesh>
-  );
-};
+    const positions = geometry.attributes.position.array as Float32Array;
+    for (let i = 0; i < portrait.heights.length; i++) positions[i * 3 + 2] = (portrait.heights[i] - .5) * depth;
+    geometry.attributes.position.needsUpdate = true;
+    geometry.computeBoundingSphere();
+    invalidate();
+  }, [geometry, portrait, depth, invalidate]);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+  return <mesh geometry={geometry} rotation={[-0.08, -.35, 0]}><meshBasicMaterial color="#b4f1d0" wireframe side={THREE.DoubleSide} toneMapped={false}/></mesh>;
+}
 
-export default App; 
+export default App;
