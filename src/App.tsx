@@ -5,11 +5,31 @@ import * as THREE from 'three';
 import * as faceapi from 'face-api.js';
 import './App.css';
 
+let modelLoad: Promise<void> | undefined;
+function loadFaceModels() {
+  if (!modelLoad) {
+    modelLoad = (async () => {
+      // The old WebGL inference backend stalls on some browsers. The mesh
+      // still uses WebGL; run the small, one-shot face detection on the CPU.
+      await faceapi.tf.setBackend('cpu');
+      await faceapi.tf.ready();
+      await Promise.all([
+        faceapi.nets.tinyFaceDetector.loadFromUri('/models'),
+        faceapi.nets.faceLandmark68Net.loadFromUri('/models'),
+      ]);
+    })().catch(error => { modelLoad = undefined; throw error; });
+  }
+  return modelLoad;
+}
+
+
 const App: React.FC = () => {
   const [imageData, setImageData] = useState<string | null>(null);
   const [heightMap, setHeightMap] = useState<Float32Array | null>(null);
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraStarting, setCameraStarting] = useState(false);
+  const [videoReady, setVideoReady] = useState(false);
+  const [modelsFailed, setModelsFailed] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const streamRef = useRef<MediaStream | null>(null);
   const cameraRequestRef = useRef(0);
@@ -20,18 +40,16 @@ const App: React.FC = () => {
   const faceCanvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
-    // Load face-api models
-    const loadModels = async () => {
-      try {
-        await faceapi.nets.tinyFaceDetector.loadFromUri('/models');
-        await faceapi.nets.faceLandmark68Net.loadFromUri('/models');
-        setModelsLoaded(true);
-      } catch (error) {
-        console.error('Error loading face detection models:', error);
-        setError('Failed to load face detection models. Please check the console for details.');
+    let active = true;
+    loadFaceModels().then(() => {
+      if (active) setModelsLoaded(true);
+    }).catch(() => {
+      if (active) {
+        setModelsFailed(true);
+        setError('Face detection could not load. Reload this page to try again.');
       }
-    };
-    loadModels();
+    });
+    return () => { active = false; };
   }, []);
 
   const stopCamera = () => {
@@ -40,6 +58,7 @@ const App: React.FC = () => {
     streamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
     setCameraActive(false);
+    setVideoReady(false);
     setCameraStarting(false);
   };
 
@@ -51,8 +70,10 @@ const App: React.FC = () => {
   const startCamera = async () => {
     const request = ++cameraRequestRef.current;
     setCameraStarting(true);
+    setVideoReady(false);
     setError(null);
     try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera is unavailable');
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
         audio: false,
@@ -62,29 +83,33 @@ const App: React.FC = () => {
         return;
       }
       streamRef.current = stream;
-      if (videoRef.current) videoRef.current.srcObject = stream;
       setCameraActive(true);
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
     } catch {
       if (request === cameraRequestRef.current) {
-        setError('Camera unavailable. Allow camera access in your browser, or open the demo in its own tab.');
+        streamRef.current?.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
+        if (videoRef.current) videoRef.current.srcObject = null;
+        setCameraActive(false);
+        setVideoReady(false);
+        setError('Camera unavailable. Open this demo in Safari or Chrome and allow camera access, or choose a photo below.');
       }
     } finally {
       if (request === cameraRequestRef.current) setCameraStarting(false);
     }
   };
 
-  const captureImage = async () => {
-    if (!videoRef.current || !canvasRef.current || !faceCanvasRef.current) {
-      console.error('Missing required refs');
-      return;
-    }
+  const processImage = async (source: CanvasImageSource, sourceWidth: number, sourceHeight: number) => {
+    if (!canvasRef.current || !faceCanvasRef.current) return;
     if (!modelsLoaded) {
       console.error('Models not loaded yet');
       setError('Face detection models are still loading. Please wait.');
       return;
     }
 
-    const video = videoRef.current;
     const canvas = canvasRef.current;
     const faceCanvas = faceCanvasRef.current;
     const context = canvas.getContext('2d');
@@ -95,31 +120,34 @@ const App: React.FC = () => {
       return;
     }
 
-    if (!video.videoWidth || !video.videoHeight) {
+    if (!sourceWidth || !sourceHeight) {
       setError('Wait for the camera preview before capturing.');
       return;
     }
     setCapturing(true);
+    setError(null);
+    // Let the browser paint the processing state before CPU inference begins.
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
     try {
       // Bound mesh resolution so camera dimensions cannot overwhelm a phone GPU.
-      const scale = Math.min(1, 256 / Math.max(video.videoWidth, video.videoHeight));
+      const scale = Math.min(1, 256 / Math.max(sourceWidth, sourceHeight));
       // Set canvas dimensions
-      canvas.width = Math.max(2, Math.round(video.videoWidth * scale));
-      canvas.height = Math.max(2, Math.round(video.videoHeight * scale));
+      canvas.width = Math.max(2, Math.round(sourceWidth * scale));
+      canvas.height = Math.max(2, Math.round(sourceHeight * scale));
       faceCanvas.width = canvas.width;
       faceCanvas.height = canvas.height;
 
       // Draw video frame to canvas
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      context.drawImage(source, 0, 0, canvas.width, canvas.height);
       
       // Detect face
       const detections = await faceapi.detectSingleFace(
         canvas,
-        new faceapi.TinyFaceDetectorOptions()
+        new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 })
       ).withFaceLandmarks();
 
       if (!detections) {
-        setError('No face detected. Please ensure your face is visible in the camera.');
+        setError('No face detected. Try a clear, well-lit portrait or center your face in the camera.');
         return;
       }
 
@@ -235,12 +263,39 @@ const App: React.FC = () => {
     }
   };
 
+  const captureImage = async () => {
+    const video = videoRef.current;
+    if (!video || !videoReady || video.readyState < 2) {
+      setError('Wait for the camera preview before capturing.');
+      return;
+    }
+    await processImage(video, video.videoWidth, video.videoHeight);
+  };
+
+  const choosePhoto = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    try {
+      const image = new Image();
+      image.src = url;
+      await image.decode();
+      await processImage(image, image.naturalWidth, image.naturalHeight);
+    } catch {
+      setError('That photo could not be opened. Try a JPEG or PNG image.');
+    } finally {
+      URL.revokeObjectURL(url);
+      input.value = '';
+    }
+  };
+
   return (
     <div className="App">
       <header>
         <h1>Face → height map</h1>
-        <p>Turn a camera snapshot into a 3D wireframe.</p>
-        <p className="privacy-note">Your camera image is processed in this browser. It is not uploaded.</p>
+        <p>Turn a camera snapshot or photo into a 3D wireframe.</p>
+        <p className="privacy-note">Images are processed in your browser and are not uploaded.</p>
       </header>
       <div className="camera-container">
         <video
@@ -250,14 +305,19 @@ const App: React.FC = () => {
           muted
           aria-label="Camera preview"
           hidden={!cameraActive}
+          onLoadedData={event => setVideoReady(Boolean(streamRef.current && event.currentTarget.videoWidth && event.currentTarget.readyState >= 2))}
+          onCanPlay={event => setVideoReady(Boolean(streamRef.current && event.currentTarget.videoWidth))}
         />
         <div className="camera-actions">
           {cameraActive ? <>
-            <button onClick={captureImage} disabled={!modelsLoaded || capturing}>{capturing ? 'Processing…' : 'Capture image'}</button>
+            <button onClick={captureImage} disabled={!modelsLoaded || !videoReady || capturing}>{capturing ? 'Processing…' : videoReady ? 'Capture image' : 'Waiting for camera…'}</button>
             <button onClick={stopCamera}>Stop camera</button>
-          </> : <button onClick={startCamera} disabled={cameraStarting}>{cameraStarting ? 'Starting camera…' : 'Try with my camera'}</button>}
+          </> : <button onClick={startCamera} disabled={cameraStarting || capturing}>{cameraStarting ? 'Starting camera…' : 'Try with my camera'}</button>}
         </div>
-        <p role="status">{modelsLoaded ? 'Face detection ready' : 'Loading face detection…'}</p>
+        <label className="photo-picker">Or choose a photo
+          <input type="file" accept="image/*" onChange={choosePhoto} disabled={!modelsLoaded || capturing} />
+        </label>
+        <p role="status">{capturing ? 'Building your height map…' : modelsLoaded ? 'Face detection ready' : modelsFailed ? 'Face detection unavailable' : 'Loading face detection…'}</p>
         {error && <div role="alert" className="error-message">{error}</div>}
         <canvas ref={canvasRef} style={{ display: 'none' }} />
         <canvas ref={faceCanvasRef} style={{ display: 'none' }} />
@@ -265,14 +325,17 @@ const App: React.FC = () => {
       
       {imageData && <img className="capture-preview" src={imageData} alt="Grayscale face capture used for the height map" />}
       {heightMap && (
-        <div className="three-container">
-          <Canvas dpr={[1, 1.5]} camera={{ position: [0, 0, 14] }}>
+        <section className="result" aria-label="3D height map result">
+          <p>Drag on the model to rotate · Pinch to zoom</p>
+          <div className="three-container">
+          <Canvas dpr={[1, 1.5]} camera={{ position: [0, 0, 14] }} fallback={<p>Open this demo in Safari or Chrome to view 3D.</p>}>
             <ambientLight intensity={0.5} />
             <pointLight position={[10, 10, 10]} />
             <HeightMapMesh heightMap={heightMap} width={canvasRef.current?.width || 0} height={canvasRef.current?.height || 0} />
             <OrbitControls />
           </Canvas>
-        </div>
+          </div>
+        </section>
       )}
     </div>
   );
@@ -303,7 +366,7 @@ const HeightMapMesh: React.FC<{ heightMap: Float32Array; width: number; height: 
   }, [heightMap, width, height]);
   
   return (
-    <mesh>
+    <mesh rotation={[-0.12, -0.5, 0]}>
       <planeGeometry
         ref={geometry}
         args={[10, 10 * height / width, width - 1, height - 1]}

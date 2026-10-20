@@ -14,4 +14,8 @@ button:focus-visible { outline: 3px solid white; outline-offset: 3px; }
 .error-message { padding: 12px; background: #522827; border: 1px solid #c97e78; border-radius: 6px; }
 .capture-preview { width: 128px; max-height: 128px; object-fit: contain; margin: 16px; }
 .three-container { width: min(100%, 800px); height: clamp(300px, 60vh, 600px); border: 1px solid #34483d; border-radius: 8px; overflow: hidden; margin-top: 12px; }
-.three-container canvas { touch-action: none; }
+.three-container, .three-container canvas { touch-action: none; overscroll-behavior: contain; }
+
+.result { width: min(100%, 800px); }
+.photo-picker { display: flex; flex-direction: column; align-items: center; gap: 8px; margin: 16px 0; }
+.photo-picker input { box-sizing: border-box; max-width: 100%; font: inherit; padding: 8px; }

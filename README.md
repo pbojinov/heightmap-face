@@ -109,3 +109,9 @@ Embed in a blog post:
 Add a normal link to the demo as an alternative for readers who prefer a separate tab.
 
 Camera access starts only after a reader clicks “Try with my camera”. It requests video only, stops tracks when stopped or unmounted, and processes snapshots locally. Meshes are capped at 256 pixels on their longest side. Face-detection models ship in `public/models/`. The embed must delegate `camera` permission; any parent Permissions-Policy must also permit this origin.
+
+### Mobile compatibility fix
+
+Face inference now uses the TensorFlow CPU backend; only 3D rendering uses WebGL. Models initialize once, the detector uses input size 224, video playback starts explicitly, and Capture remains disabled until a frame is ready. Users can choose a photo when camera access is blocked. The result starts at an angle so the height is visible. Images are processed locally in the browser.
+
+Verified the unmodified production build with no-face recovery followed by a successful portrait upload at 390×844 CSS pixels. A local camera-input fixture also verifies denied permission, video-frame readiness, successful capture, and Stop camera without accessing a physical webcam. Physical phone camera permission behavior still needs a device check.
